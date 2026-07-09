@@ -1,0 +1,19 @@
+# Smart Options Scanner Dependencies
+
+# API & HTTP
+httpx>=0.24.0
+curl_cffi>=0.13.0
+praw>=7.8.1
+
+# Web Dashboard
+fastapi>=0.100.0
+uvicorn>=0.23.0
+
+# Data Processing
+pandas>=2.0.0
+
+# Optional: SMS Alerts (uncomment to use)
+# twilio>=8.0.0
+
+# Optional: Email Alerts (uncomment to use)
+# sendgrid>=6.0.0

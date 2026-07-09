@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# Local runtime state -- never commit real data
+scanner.db
+scanner.db-*
+scanner.db.bak*
+*.sqlite
+*.sqlite3
+credentials.env
+tokens.json
+REAUTH_NEEDED.flag
+.env
+*.log
+logs/
+reports/
+sentiment_sent_*.json
+
+# Personal deployment artifacts (absolute paths / launchd configs)
+*.plist
+deploy.sh
+install_service.sh
+run_scanner.sh
+setup.sh
