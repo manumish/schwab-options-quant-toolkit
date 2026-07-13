@@ -9,8 +9,9 @@ Pipeline:
   2. Book triage by DTE/expiration urgency (short options first)
   3. Earnings hard-stop filter from scanner.db earnings_dates table (7-day window)
   4. CC ladder on covered equity (15-22% OTM, 25-50 DTE), earnings-clear only
-  5. CSP candidates ranked by margin annualized yield (+ BP reduction, notional-if-assigned)
-  6. Persist daily_plan rows to scanner.db; write human-readable report to ~/.schwab/reports/
+  5. Broad CSP scan ranked by raw margin annualized yield
+  6. Opportunity model reconciles raw rank against assignment quality, portfolio fit, and risk
+  7. Persist daily_plan + tip_opportunities rows; write human-readable report to ~/.schwab/reports/
 
 Run by launchd ~6:00 AM PT weekdays. Exit 0 ok, 2 reauth-needed, 1 error.
 """
@@ -28,7 +29,7 @@ DB = str(HOME / ".schwab" / "scanner.db")  # canonical, TCC-safe
 REPORTS = HOME / ".schwab" / "reports"
 LOG = HOME / ".schwab" / "logs" / "morning_scan.log"
 
-# Credentials must come from environment variables -- see README.md / credentials.env.example
+# Credentials must come from environment variables. Do not commit real app keys.
 APP_KEY = os.environ.get("SCHWAB_CLIENT_ID", "")
 APP_SECRET = os.environ.get("SCHWAB_CLIENT_SECRET", "")
 if not APP_KEY or not APP_SECRET:
@@ -190,9 +191,19 @@ DEFAULT_UNIVERSE = [
     'COST','WMT','HD','MCD',
 ]
 
+def scan_universe(extra=None):
+    """Broad optionable universe for discovery; includes holdings and legacy list."""
+    try:
+        from tip_opportunity_model import broad_option_universe
+        return broad_option_universe(set(DEFAULT_UNIVERSE) | set(extra or []))
+    except Exception:
+        symbols = set(DEFAULT_UNIVERSE)
+        symbols.update(extra or [])
+        return sorted(symbols)
+
 def csp_scan(cl, earn, universe=None):
     import csp_scanner
-    universe = universe or DEFAULT_UNIVERSE
+    universe = universe or scan_universe()
     rows = []
     for s in universe:
         try:
@@ -258,9 +269,32 @@ def persist(db, cc, csp):
     c.commit(); c.close()
 
 # ---------------------------------------------------------------------------
-# Report writer
+# Opportunity model + report writer
 # ---------------------------------------------------------------------------
-def write_report(bal, tiers, cc, csp):
+def build_opportunity_layer(cc, csp, equities, bal):
+    try:
+        from tip_opportunity_model import build_opportunities
+        nlv = float(bal.get('liquidationValue') or 0)
+        return build_opportunities(cc, csp, equities, nlv, Path(DB), TODAY.isoformat())
+    except Exception as e:
+        log(f"WARN opportunity model failed: {e}")
+        return []
+
+def diversified_opportunities(rows, limit=30, max_per_symbol=1):
+    picked = []
+    counts = {}
+    for r in rows:
+        sym = getattr(r, 'symbol', None)
+        if counts.get(sym, 0) >= max_per_symbol:
+            continue
+        picked.append(r)
+        counts[sym] = counts.get(sym, 0) + 1
+        if len(picked) >= limit:
+            break
+    return picked
+
+def write_report(bal, tiers, cc, csp, opportunities=None):
+    opportunities = opportunities or []
     REPORTS.mkdir(parents=True, exist_ok=True)
     p = REPORTS / f"morning_{TODAY.isoformat()}.md"
     L = []
@@ -283,7 +317,20 @@ def write_report(bal, tiers, cc, csp):
         L.append(f"- {r['sym']} {r['exp']} {r['dte']}d K{r['strike']:.0f} "
                  f"{r['otm_pct']:.0f}%OTM x{r['contracts']} prem${r['premium_total']:,.0f} "
                  f"[{r['earn_state']}]{flag}")
-    L.append("\n## CSP candidates (ranked by margin ann. yield)\n")
+    if opportunities:
+        L.append("\n## Underwritten opportunity board\n")
+        L.append("Machine rank is reconciled against assignment quality, portfolio fit, risk, and data confidence.")
+        for r in diversified_opportunities(opportunities, 30, 1):
+            prem = f" prem${r.premium:,.0f}" if getattr(r, 'premium', 0) else ""
+            yld = f" yld{r.ann_yield:.0f}%" if getattr(r, 'ann_yield', 0) else ""
+            exp = f" {r.expiry} {r.dte}d" if getattr(r, 'expiry', '') else ""
+            L.append(
+                f"- {r.label} {r.score:02d} {r.sleeve}: {r.symbol} {r.strategy} "
+                f"{r.structure}{exp}{prem}{yld} | {r.assignment_view} "
+                f"Alt: {r.alternative}."
+            )
+
+    L.append("\n## Raw CSP candidates (ranked by margin ann. yield)\n")
     for r in csp[:25]:
         L.append(f"- {r['sym']} {r['exp']} {r['dte']}d K{r['strike']:.0f} "
                  f"{r['otm_pct']:.0f}%OTM d{abs(r.get('delta') or 0):.2f} iv{r.get('iv') or 0:.0f} "
@@ -333,11 +380,15 @@ def main():
 
     cc = cc_ladder(cl, eq, earn, quotes)
     log(f"CC ladder: {len(cc)} earnings-clear candidates")
-    csp = csp_scan(cl, earn)
-    log(f"CSP scan: {len(csp)} earnings-clear candidates")
+    universe = scan_universe(eqsyms)
+    log(f"CSP universe: {len(universe)} symbols")
+    csp = csp_scan(cl, earn, universe=universe)
+    log(f"CSP scan: {len(csp)} earnings-screened candidates")
 
     persist(DB, cc, csp)
-    rpt = write_report(bal, tiers, cc, csp)
+    opportunities = build_opportunity_layer(cc, csp, eq, bal)
+    log(f"Opportunity model: {len(opportunities)} underwritten ideas")
+    rpt = write_report(bal, tiers, cc, csp, opportunities)
     log(f"report -> {rpt}")
 
     # scan_runs row

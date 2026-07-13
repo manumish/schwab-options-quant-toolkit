@@ -15,6 +15,9 @@ REAUTH_NEEDED.flag
 .env
 *.log
 logs/
+export_log*
+*export-log*
+*export_log*
 reports/
 sentiment_sent_*.json
 
