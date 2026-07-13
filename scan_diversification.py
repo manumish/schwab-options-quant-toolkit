@@ -21,14 +21,10 @@ from schwab_client import SchwabClient, analyze_put_opportunities
 # =========================================
 
 # Your Schwab API credentials
-CLIENT_ID = os.environ.get("SCHWAB_CLIENT_ID", "")
-CLIENT_SECRET = os.environ.get("SCHWAB_CLIENT_SECRET", "")
-if not CLIENT_ID or not CLIENT_SECRET:
-    raise RuntimeError("Set SCHWAB_CLIENT_ID and SCHWAB_CLIENT_SECRET environment variables")
-
-# Option 2: Use environment variables (recommended)
 # export SCHWAB_CLIENT_ID="your_client_id"
 # export SCHWAB_CLIENT_SECRET="your_client_secret"
+CLIENT_ID = os.environ.get("SCHWAB_CLIENT_ID", "")
+CLIENT_SECRET = os.environ.get("SCHWAB_CLIENT_SECRET", "")
 
 # Diversification target symbols
 DEFENSE_STOCKS = ['RTX', 'LMT', 'GD', 'NOC']

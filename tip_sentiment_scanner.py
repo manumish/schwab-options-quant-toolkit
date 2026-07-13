@@ -61,9 +61,9 @@ BEARISH_WORDS = frozenset({
     'danger', 'warning', 'collapse', 'fraud', 'dilution', 'debt'
 })
 
-# Default watchlist — EXAMPLE symbols only, replace with your own
+# Default watchlist — portfolio + diversification targets
 DEFAULT_SYMBOLS = [
-    # Example holdings
+    # Current portfolio
     'NVDA', 'ORCL', 'TSLA', 'LLY', 'UNH', 'AMZN', 'AMD', 'ABBV',
     'ISRG', 'MSFT', 'RTX', 'VST', 'JPM', 'INTC',
     # Active options underlyings

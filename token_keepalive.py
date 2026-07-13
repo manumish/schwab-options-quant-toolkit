@@ -14,20 +14,17 @@ What it does:
 
 Exit codes: 0 ok, 2 refresh failed (refresh token likely dead -> re-auth).
 """
-import json, sys, base64, os
+import json, os, sys, base64
 from pathlib import Path
 from datetime import datetime, timedelta
 import httpx
 
-# Credentials must come from environment variables -- see README.md / credentials.env.example
 APP_KEY = os.environ.get("SCHWAB_CLIENT_ID", "")
 APP_SECRET = os.environ.get("SCHWAB_CLIENT_SECRET", "")
-if not APP_KEY or not APP_SECRET:
-    raise RuntimeError("Set SCHWAB_CLIENT_ID and SCHWAB_CLIENT_SECRET environment variables")
 HOME = Path.home()
 TOKEN_PATH = HOME / ".schwab" / "tokens.json"
 WARN_PATH  = HOME / ".schwab" / "REAUTH_NEEDED.flag"
-LOG_PATH   = Path(__file__).resolve().parent / "logs" / "token_keepalive.log"
+LOG_PATH   = HOME / ".schwab" / "logs" / "token_keepalive.log"
 REFRESH_TTL_DAYS = 7
 WARN_WINDOW_HOURS = 24
 
@@ -52,7 +49,6 @@ def save(t):
     TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(TOKEN_PATH, 'w') as f:
         json.dump(t, f, indent=2)
-    os.chmod(TOKEN_PATH, 0o600)  # tokens are secrets -- owner read/write only
 
 def do_refresh(tokens):
     rt = tokens.get('refresh_token')

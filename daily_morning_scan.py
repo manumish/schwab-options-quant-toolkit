@@ -15,7 +15,7 @@ Pipeline:
 
 Run by launchd ~6:00 AM PT weekdays. Exit 0 ok, 2 reauth-needed, 1 error.
 """
-import os, sys, json, sqlite3, base64
+import os, sys, json, sqlite3, base64, statistics
 from pathlib import Path
 from datetime import datetime, date, timedelta
 
@@ -29,11 +29,8 @@ DB = str(HOME / ".schwab" / "scanner.db")  # canonical, TCC-safe
 REPORTS = HOME / ".schwab" / "reports"
 LOG = HOME / ".schwab" / "logs" / "morning_scan.log"
 
-# Credentials must come from environment variables. Do not commit real app keys.
 APP_KEY = os.environ.get("SCHWAB_CLIENT_ID", "")
 APP_SECRET = os.environ.get("SCHWAB_CLIENT_SECRET", "")
-if not APP_KEY or not APP_SECRET:
-    raise RuntimeError("Set SCHWAB_CLIENT_ID and SCHWAB_CLIENT_SECRET environment variables")
 
 EARN_BUFFER_DAYS = 7
 NEAR_POST_EXP_DAYS = 21   # earnings within N days AFTER expiry => IV contaminated
@@ -107,6 +104,90 @@ def make_client():
 def reg_t_bp(strike, spot, prem_ps):
     otm_amt = max(spot - strike, 0)
     return max(0.20*spot - otm_amt + prem_ps, 0.10*strike + prem_ps) * 100
+
+def safe_float(v, default=0.0):
+    try:
+        if v is None:
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+def add_execution_metrics(row):
+    """Annotate bid/ask spread and delta-derived assignment probability."""
+    bid = safe_float(row.get('bid'))
+    ask = safe_float(row.get('ask'))
+    mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else 0.0
+    spread_pct = ((ask - bid) / mid * 100.0) if mid > 0 else None
+    delta = abs(safe_float(row.get('delta')))
+    row['spread_pct'] = round(spread_pct, 1) if spread_pct is not None else None
+    row['assignment_prob'] = round(delta * 100.0, 1) if delta > 0 else None
+    return row
+
+def annotate_vol_context(cl, rows, max_rv_fetch=50):
+    """
+    Add IV rank/percentile and IV-RV fields in-place.
+
+    IV history is local and cheap. Realized vol needs Schwab price-history calls,
+    so fetch only symbols that appear in candidate rows and cap the extra work.
+    """
+    if not rows:
+        return
+    try:
+        from iv_tracker import IVHistoryTracker, yang_zhang_realized_vol
+        tracker = IVHistoryTracker(DB)
+    except Exception as e:
+        log(f"WARN IV tracker unavailable: {e}")
+        return
+
+    by_symbol = {}
+    for r in rows:
+        sym = r.get('sym')
+        iv = safe_float(r.get('iv'))
+        if not sym or iv <= 0:
+            continue
+        by_symbol.setdefault(sym, []).append(iv)
+
+    for sym, ivs in by_symbol.items():
+        try:
+            tracker.record_iv(sym, statistics.median(ivs))
+        except Exception as e:
+            log(f"WARN record IV failed for {sym}: {e}")
+
+    rv_cache = {}
+    for sym in list(by_symbol)[:max_rv_fetch]:
+        rv = None
+        try:
+            rv = tracker.latest_realized_vol(sym, window_days=30, max_age_days=5)
+            if rv is None:
+                hist = cl.get_price_history(sym, period_type='month', period=2,
+                                            frequency_type='daily', frequency=1)
+                rv = yang_zhang_realized_vol(hist.get('candles') or [], window_days=30)
+                if rv is not None:
+                    tracker.record_realized_vol(sym, rv, window_days=30)
+        except Exception as e:
+            log(f"WARN realized vol fetch failed for {sym}: {str(e)[:120]}")
+        rv_cache[sym] = rv
+
+    for r in rows:
+        add_execution_metrics(r)
+        sym = r.get('sym')
+        iv = safe_float(r.get('iv'))
+        if not sym or iv <= 0:
+            continue
+        try:
+            metrics = tracker.calculate_iv_metrics(sym, iv)
+        except Exception:
+            metrics = {}
+        rv = rv_cache.get(sym)
+        r['iv_rank'] = metrics.get('iv_rank')
+        r['iv_percentile'] = metrics.get('iv_percentile')
+        r['iv_rank_percentile_divergence'] = metrics.get('iv_rank_percentile_divergence')
+        r['iv_outlier_distorted'] = bool(metrics.get('iv_outlier_distorted'))
+        r['iv_history_points'] = metrics.get('history_points')
+        r['vol_confidence'] = metrics.get('history_confidence') or 'NONE'
+        r['rv_30d'] = round(rv, 1) if rv is not None else None
+        r['iv_rv_spread'] = round(iv - rv, 1) if rv is not None else None
 
 # ---------------------------------------------------------------------------
 # Book triage — classify open option positions by urgency
@@ -245,6 +326,19 @@ def ensure_tables(db):
         strike REAL, otm_pct REAL, bid REAL, delta REAL, iv REAL,
         premium REAL, bp_reduction REAL, notional REAL, ann_yield REAL,
         earn_state TEXT, earn_note TEXT, created_at TEXT)""")
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(daily_plan)").fetchall()}
+    for name, typ in {
+        'spread_pct': 'REAL',
+        'assignment_prob': 'REAL',
+        'iv_rank': 'REAL',
+        'iv_percentile': 'REAL',
+        'iv_rank_percentile_divergence': 'REAL',
+        'rv_30d': 'REAL',
+        'iv_rv_spread': 'REAL',
+        'vol_confidence': 'TEXT',
+    }.items():
+        if name not in cols:
+            cur.execute(f"ALTER TABLE daily_plan ADD COLUMN {name} {typ}")
     cur.execute("""CREATE TABLE IF NOT EXISTS scan_runs (
         scan_date TEXT, started_at TEXT, finished_at TEXT,
         nlv REAL, avail_funds REAL, maint_req REAL, margin_bal REAL,
@@ -256,16 +350,32 @@ def persist(db, cc, csp):
     sd = TODAY.isoformat(); now = datetime.now().isoformat()
     cur.execute("DELETE FROM daily_plan WHERE scan_date=?", (sd,))
     for r in cc[:40]:
-        cur.execute("""INSERT INTO daily_plan VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        cur.execute("""INSERT INTO daily_plan
+            (scan_date, kind, sym, exp, dte, strike, otm_pct, bid, delta, iv,
+             premium, bp_reduction, notional, ann_yield, earn_state, earn_note, created_at,
+             spread_pct, assignment_prob, iv_rank, iv_percentile,
+             iv_rank_percentile_divergence, rv_30d, iv_rv_spread, vol_confidence)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (sd,'CC',r['sym'],r['exp'],r['dte'],r['strike'],r.get('otm_pct'),
              r.get('bid'),r.get('delta'),r.get('iv'),r.get('premium_total'),
-             None,None,None,r['earn_state'],r['earn_note'],now))
+             None,None,None,r['earn_state'],r['earn_note'],now,
+             r.get('spread_pct'),r.get('assignment_prob'),r.get('iv_rank'),
+             r.get('iv_percentile'),r.get('iv_rank_percentile_divergence'),
+             r.get('rv_30d'),r.get('iv_rv_spread'),r.get('vol_confidence')))
     for r in csp[:60]:
-        cur.execute("""INSERT INTO daily_plan VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        cur.execute("""INSERT INTO daily_plan
+            (scan_date, kind, sym, exp, dte, strike, otm_pct, bid, delta, iv,
+             premium, bp_reduction, notional, ann_yield, earn_state, earn_note, created_at,
+             spread_pct, assignment_prob, iv_rank, iv_percentile,
+             iv_rank_percentile_divergence, rv_30d, iv_rv_spread, vol_confidence)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (sd,'CSP',r['sym'],r['exp'],r['dte'],r['strike'],r.get('otm_pct'),
              r.get('bid'),r.get('delta'),r.get('iv'),r.get('premium_100'),
              r.get('bp_reduction'),r.get('notional'),r.get('margin_ann_yield'),
-             r['earn_state'],r['earn_note'],now))
+             r['earn_state'],r['earn_note'],now,
+             r.get('spread_pct'),r.get('assignment_prob'),r.get('iv_rank'),
+             r.get('iv_percentile'),r.get('iv_rank_percentile_divergence'),
+             r.get('rv_30d'),r.get('iv_rv_spread'),r.get('vol_confidence')))
     c.commit(); c.close()
 
 # ---------------------------------------------------------------------------
@@ -332,10 +442,14 @@ def write_report(bal, tiers, cc, csp, opportunities=None):
 
     L.append("\n## Raw CSP candidates (ranked by margin ann. yield)\n")
     for r in csp[:25]:
+        vrp = f" vrp{r['iv_rv_spread']:+.0f}" if r.get('iv_rv_spread') is not None else ""
+        ivp = f" ivp{r['iv_percentile']:.0f}" if r.get('iv_percentile') is not None else ""
+        spd = f" spr{r['spread_pct']:.0f}%" if r.get('spread_pct') is not None else ""
         L.append(f"- {r['sym']} {r['exp']} {r['dte']}d K{r['strike']:.0f} "
                  f"{r['otm_pct']:.0f}%OTM d{abs(r.get('delta') or 0):.2f} iv{r.get('iv') or 0:.0f} "
                  f"prem${r['premium_100']:,.0f} BP${r['bp_reduction']:,.0f} "
-                 f"yld{r['margin_ann_yield']:.0f}% notl${r['notional']:,.0f} [{r['earn_state']}]")
+                 f"yld{r['margin_ann_yield']:.0f}%{ivp}{vrp}{spd} "
+                 f"notl${r['notional']:,.0f} [{r['earn_state']}]")
     p.write_text("\n".join(L))
     return p
 
@@ -353,8 +467,6 @@ def main():
 
     import parse_book
     ensure_tables(DB)
-    earn = load_earnings(DB)
-    log(f"loaded {len(earn)} earnings dates")
 
     cl = make_client()
     accts = cl.get_account_numbers()
@@ -378,16 +490,41 @@ def main():
     except Exception as e:
         log(f"WARN quotes failed: {e}")
 
+    universe = scan_universe(eqsyms)
+    try:
+        from earnings_calendar import refresh_earnings_dates
+        status = refresh_earnings_dates(universe, DB, logger=log)
+        if status.get('skipped'):
+            log(f"earnings refresh skipped: {status.get('message')}")
+        else:
+            log(f"earnings refresh: {status.get('updated')} rows via {','.join(status.get('sources') or [])}")
+    except Exception as e:
+        log(f"WARN earnings refresh unavailable: {e}")
+
+    earn = load_earnings(DB)
+    log(f"loaded {len(earn)} earnings dates")
+
     cc = cc_ladder(cl, eq, earn, quotes)
     log(f"CC ladder: {len(cc)} earnings-clear candidates")
-    universe = scan_universe(eqsyms)
     log(f"CSP universe: {len(universe)} symbols")
     csp = csp_scan(cl, earn, universe=universe)
     log(f"CSP scan: {len(csp)} earnings-screened candidates")
+    annotate_vol_context(cl, cc + csp)
+    log("vol/liquidity context annotated")
 
     persist(DB, cc, csp)
     opportunities = build_opportunity_layer(cc, csp, eq, bal)
     log(f"Opportunity model: {len(opportunities)} underwritten ideas")
+    try:
+        from outcome_tracker import snapshot_surfaced_ideas
+        outcome_status = snapshot_surfaced_ideas(Path(DB), TODAY.isoformat())
+        log(
+            f"Outcome snapshots: {outcome_status.get('inserted')} new / "
+            f"{outcome_status.get('surfaced')} surfaced "
+            f"({outcome_status.get('skipped')} missing strike)"
+        )
+    except Exception as e:
+        log(f"ERROR outcome snapshot failed: {e}")
     rpt = write_report(bal, tiers, cc, csp, opportunities)
     log(f"report -> {rpt}")
 

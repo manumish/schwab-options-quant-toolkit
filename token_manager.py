@@ -9,11 +9,8 @@ import os
 from pathlib import Path
 from datetime import datetime, timedelta
 
-# Credentials must come from environment variables -- see README.md / credentials.env.example
 APP_KEY = os.environ.get("SCHWAB_CLIENT_ID", "")
 APP_SECRET = os.environ.get("SCHWAB_CLIENT_SECRET", "")
-if not APP_KEY or not APP_SECRET:
-    raise RuntimeError("Set SCHWAB_CLIENT_ID and SCHWAB_CLIENT_SECRET environment variables")
 TOKEN_PATH = Path.home() / ".schwab" / "tokens.json"
 
 def load_tokens() -> dict:
@@ -28,7 +25,6 @@ def save_tokens(tokens: dict):
     TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(TOKEN_PATH, 'w') as f:
         json.dump(tokens, f, indent=2)
-    os.chmod(TOKEN_PATH, 0o600)  # tokens are secrets -- owner read/write only
 
 def is_token_expired(tokens: dict) -> bool:
     """Check if access token is expired or about to expire"""

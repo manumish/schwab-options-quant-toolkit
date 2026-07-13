@@ -195,6 +195,25 @@ def _bounded(v: float, lo: int = 0, hi: int = 100) -> int:
     return int(max(lo, min(hi, round(v))))
 
 
+def _num(v, default: float = 0.0) -> float:
+    try:
+        if v is None:
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+
+def _optional_num(row: dict, key: str) -> Optional[float]:
+    v = row.get(key)
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except Exception:
+        return None
+
+
 def _label(score: int, risk_score: int, earn_state: str, strategy: str) -> str:
     if earn_state == "BLOCK":
         return "BLOCKED"
@@ -211,12 +230,18 @@ def _label(score: int, risk_score: int, earn_state: str, strategy: str) -> str:
 
 def _csp_idea(row: dict, ctx: Dict[str, object], raw_rank: int) -> OpportunityIdea:
     sym = row.get("sym")
-    yld = float(row.get("margin_ann_yield") or row.get("ann_yield") or 0)
-    delta = abs(float(row.get("delta") or 0))
-    iv = float(row.get("iv") or 0)
-    oi = float(row.get("oi") or 0)
-    bid = float(row.get("bid") or 0)
-    ask = float(row.get("ask") or 0)
+    yld = _num(row.get("margin_ann_yield") or row.get("ann_yield"))
+    delta = abs(_num(row.get("delta")))
+    iv = _num(row.get("iv"))
+    oi = _num(row.get("oi"))
+    bid = _num(row.get("bid"))
+    ask = _num(row.get("ask"))
+    spread_pct = _optional_num(row, "spread_pct")
+    iv_rank = _optional_num(row, "iv_rank")
+    iv_percentile = _optional_num(row, "iv_percentile")
+    iv_rv_spread = _optional_num(row, "iv_rv_spread")
+    divergence = _optional_num(row, "iv_rank_percentile_divergence")
+    vol_confidence = row.get("vol_confidence") or "NONE"
     earn_state = row.get("earn_state") or "UNKNOWN"
     weight = ctx.get("weights", {}).get(sym, 0.0)
     sector_weight = ctx.get("sector_weights", {}).get(sector_for(sym), 0.0)
@@ -229,11 +254,27 @@ def _csp_idea(row: dict, ctx: Dict[str, object], raw_rank: int) -> OpportunityId
     if yld >= 50:
         alpha -= 6
 
-    vol = 40 + min(30, yld / 2.0)
+    vol = 40 + min(22, yld / 3.0)
     if 25 <= iv <= 60:
         vol += 10
     elif iv > 75:
         vol -= 12
+    if iv_rv_spread is not None:
+        if iv_rv_spread >= 15:
+            vol += 16
+        elif iv_rv_spread >= 8:
+            vol += 10
+        elif iv_rv_spread >= 3:
+            vol += 4
+        elif iv_rv_spread < 0:
+            vol -= 18
+    if iv_percentile is not None:
+        if iv_percentile >= 80:
+            vol += 8
+        elif iv_percentile >= 65:
+            vol += 4
+        elif iv_percentile < 35:
+            vol -= 8
 
     execution = 45
     if oi >= 500:
@@ -246,6 +287,13 @@ def _csp_idea(row: dict, ctx: Dict[str, object], raw_rank: int) -> OpportunityId
             execution += 12
         elif spread >= 0.30:
             execution -= 12
+    if spread_pct is not None:
+        if spread_pct <= 8:
+            execution += 6
+        elif spread_pct >= 25:
+            execution -= 18
+        elif spread_pct >= 15:
+            execution -= 8
 
     fit = 62
     if weight >= 10:
@@ -260,6 +308,14 @@ def _csp_idea(row: dict, ctx: Dict[str, object], raw_rank: int) -> OpportunityId
     data_confidence = 78 if earn_state == "CLEAR" else (58 if earn_state == "NEAR" else 42)
     if oi <= 0:
         data_confidence -= 10
+    if vol_confidence == "HIGH":
+        data_confidence += 5
+    elif vol_confidence == "LOW":
+        data_confidence -= 5
+    else:
+        data_confidence -= 12
+    if divergence is not None and divergence > 25:
+        data_confidence -= 8
 
     risk = 36
     if earn_state == "NEAR":
@@ -268,6 +324,12 @@ def _csp_idea(row: dict, ctx: Dict[str, object], raw_rank: int) -> OpportunityId
         risk += 24
     if iv >= 65:
         risk += 14
+    if iv_rv_spread is not None and iv_rv_spread < 0:
+        risk += 10
+    if spread_pct is not None and spread_pct >= 25:
+        risk += 10
+    if row.get("iv_outlier_distorted"):
+        risk += 6
     if weight >= 10:
         risk += 25
     if sym in RISK_NOTES:
@@ -279,7 +341,7 @@ def _csp_idea(row: dict, ctx: Dict[str, object], raw_rank: int) -> OpportunityId
     fit = _bounded(fit)
     data_confidence = _bounded(data_confidence)
     risk = _bounded(risk)
-    score = _bounded(alpha * 0.25 + vol * 0.20 + fit * 0.25 + execution * 0.15 + data_confidence * 0.15 - max(0, risk - 50) * 0.35)
+    score = _bounded(alpha * 0.23 + vol * 0.23 + fit * 0.24 + execution * 0.15 + data_confidence * 0.15 - max(0, risk - 50) * 0.35)
     label = _label(score, risk, earn_state, "CSP")
 
     breakeven = float(row.get("strike") or 0) - float(row.get("premium_100") or row.get("premium") or 0) / 100.0
@@ -296,6 +358,20 @@ def _csp_idea(row: dict, ctx: Dict[str, object], raw_rank: int) -> OpportunityId
         alt = "Prefer covered-call monetization or skip adding exposure"
 
     structure = f"{float(row.get('strike') or 0):.0f}P"
+    vol_bits = []
+    if iv_percentile is not None:
+        vol_bits.append(f"IVP {iv_percentile:.0f}")
+    if iv_rank is not None:
+        vol_bits.append(f"IVR {iv_rank:.0f}")
+    if iv_rv_spread is not None:
+        vol_bits.append(f"VRP {iv_rv_spread:+.0f}")
+    if spread_pct is not None:
+        vol_bits.append(f"spread {spread_pct:.0f}%")
+    vol_context = ", ".join(vol_bits)
+    raw_reason = f"Raw CSP rank #{raw_rank}: {yld:.1f}% margin annualized yield, IV {iv:.0f}, delta {delta:.2f}, earnings {earn_state}."
+    if vol_context:
+        raw_reason = raw_reason[:-1] + f", {vol_context}."
+
     return OpportunityIdea(
         scan_date=date.today().isoformat(),
         sleeve="QUALITY_DIP_CSP" if label in ("ACTIONABLE", "CONDITIONAL") else "YIELD_TRAP_REVIEW",
@@ -306,7 +382,7 @@ def _csp_idea(row: dict, ctx: Dict[str, object], raw_rank: int) -> OpportunityId
         dte=int(row.get("dte") or 0),
         score=score,
         label=label,
-        raw_rank_reason=f"Raw CSP rank #{raw_rank}: {yld:.1f}% margin annualized yield, IV {iv:.0f}, delta {delta:.2f}, earnings {earn_state}.",
+        raw_rank_reason=raw_reason,
         assignment_view=assignment,
         failure_point=risk_note,
         alternative=alt,
@@ -329,20 +405,43 @@ def _csp_idea(row: dict, ctx: Dict[str, object], raw_rank: int) -> OpportunityId
 def _cc_idea(row: dict, ctx: Dict[str, object], raw_rank: int) -> OpportunityIdea:
     sym = row.get("sym")
     weight = ctx.get("weights", {}).get(sym, 0.0)
-    iv = float(row.get("iv") or 0)
-    delta = abs(float(row.get("delta") or 0))
-    premium = float(row.get("premium_total") or row.get("premium") or 0)
+    iv = _num(row.get("iv"))
+    delta = abs(_num(row.get("delta")))
+    premium = _num(row.get("premium_total") or row.get("premium"))
+    spread_pct = _optional_num(row, "spread_pct")
+    iv_percentile = _optional_num(row, "iv_percentile")
+    iv_rv_spread = _optional_num(row, "iv_rv_spread")
     earn_state = row.get("earn_state") or "UNKNOWN"
     fit = _bounded(52 + min(28, weight * 2.0))
     vol = _bounded(42 + min(25, iv / 2.5))
+    if iv_rv_spread is not None and iv_rv_spread >= 8:
+        vol = _bounded(vol + 8)
+    if iv_percentile is not None and iv_percentile >= 70:
+        vol = _bounded(vol + 5)
     alpha = _bounded(48 + (8 if delta <= 0.25 else -5))
     execution = 62 if premium > 0 else 40
+    if spread_pct is not None:
+        if spread_pct <= 10:
+            execution += 6
+        elif spread_pct >= 25:
+            execution -= 12
+    execution = _bounded(execution)
     data_confidence = 76 if earn_state == "CLEAR" else 58
     risk = 34 if weight >= 8 else 42
     score = _bounded(alpha * 0.20 + vol * 0.20 + fit * 0.30 + execution * 0.15 + data_confidence * 0.15)
     label = _label(score, risk, earn_state, "CC")
     strike = float(row.get("strike") or 0)
     structure = f"{strike:.0f}C"
+    vol_bits = []
+    if iv_percentile is not None:
+        vol_bits.append(f"IVP {iv_percentile:.0f}")
+    if iv_rv_spread is not None:
+        vol_bits.append(f"VRP {iv_rv_spread:+.0f}")
+    if spread_pct is not None:
+        vol_bits.append(f"spread {spread_pct:.0f}%")
+    raw_reason = f"Raw CC rank #{raw_rank}: premium ${premium:,.0f}, IV {iv:.0f}, delta {delta:.2f}, earnings {earn_state}."
+    if vol_bits:
+        raw_reason = raw_reason[:-1] + f", {', '.join(vol_bits)}."
     return OpportunityIdea(
         scan_date=date.today().isoformat(),
         sleeve="PORTFOLIO_MONETIZATION",
@@ -353,7 +452,7 @@ def _cc_idea(row: dict, ctx: Dict[str, object], raw_rank: int) -> OpportunityIde
         dte=int(row.get("dte") or 0),
         score=score,
         label=label,
-        raw_rank_reason=f"Raw CC rank #{raw_rank}: premium ${premium:,.0f}, IV {iv:.0f}, delta {delta:.2f}, earnings {earn_state}.",
+        raw_rank_reason=raw_reason,
         assignment_view=f"Covered-call sale monetizes existing {weight:.1f}% NLV position; check willingness to cap upside above {strike:.2f}.",
         failure_point="upside opportunity cost if the stock re-rates through the strike",
         alternative="Use higher strike or wait if catalyst/upside is still the main thesis",

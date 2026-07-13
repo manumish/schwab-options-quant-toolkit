@@ -12,12 +12,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from schwab_client import SchwabClient
 
-# Credentials must come from environment variables -- see README.md / credentials.env.example
+# Your credentials
 CLIENT_ID = os.environ.get("SCHWAB_CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("SCHWAB_CLIENT_SECRET", "")
-CALLBACK_URL = os.environ.get("SCHWAB_CALLBACK_URL", "https://127.0.0.1")
-if not CLIENT_ID or not CLIENT_SECRET:
-    raise RuntimeError("Set SCHWAB_CLIENT_ID and SCHWAB_CLIENT_SECRET environment variables")
+CALLBACK_URL = "https://127.0.0.1"
 
 def main():
     print("="*60)

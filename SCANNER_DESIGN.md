@@ -68,7 +68,7 @@ Trigger: Price up >8% in 5 days
          AND approaching resistance
 
 Alert: "📈 ORCL rallied 12% to resistance at $165. RSI: 74.
-        Sell $170 Mar calls on your shares @ $8.70."
+        Sell $170 Mar calls on your 1820 shares @ $8.70."
 ```
 
 ### 4. **PREMIUM RICH** (Best Risk/Reward)
@@ -153,8 +153,8 @@ Alert: "🚨 Portfolio check: Tech now 92% of holdings.
 │                                                                 │
 │  📊 YOUR POSITIONS                                              │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │ TICK  XXXX sh  +XXX%  │ No calls written │ SELL CALLS? │   │
-│  │ TICK  XXXX sh  +XX%   │ No calls written │ WAIT        │   │
+│  │ NVDA  2106 sh  +523%  │ No calls written │ SELL CALLS? │   │
+│  │ ORCL  1820 sh  +11%   │ No calls written │ WAIT        │   │
 │  │ Short VST $145P       │ 18 DTE │ Safe    │ MONITOR     │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                                                                 │
@@ -253,7 +253,7 @@ schwab-scanner/
 # config.yaml
 
 watchlist:
-  # Example positions -- replace with your own
+  # Your positions
   positions:
     - NVDA
     - ORCL
@@ -304,7 +304,7 @@ alerts:
   
   email:
     enabled: true
-    address: "you@example.com"
+    address: "user@example.com"
     daily_digest: "07:00"
     weekly_recap: "sunday 18:00"
   

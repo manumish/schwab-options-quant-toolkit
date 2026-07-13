@@ -192,7 +192,7 @@ def build_brief(scan_date=None, limit=8, max_per_symbol=1):
         "",
         f"Generated {generated}",
         "",
-        "Scope: read-only ranked ideas. The operator sizes and executes manually.",
+        "Scope: read-only ranked ideas. Manu sizes and executes manually.",
         "",
         "## Account",
         "",

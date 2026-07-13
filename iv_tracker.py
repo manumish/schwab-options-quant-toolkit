@@ -5,14 +5,20 @@ Tracks implied volatility over time for accurate IV percentile/rank calculations
 
 import sqlite3
 from datetime import datetime, timedelta
-from typing import Optional, List, Tuple
+from pathlib import Path
+from typing import List, Optional, Tuple
 import statistics
+import math
+
+HIGH_CONFIDENCE_MIN_POINTS = 180
+LOW_CONFIDENCE_MIN_POINTS = 60
+STALE_HISTORY_DAYS = 14
 
 class IVHistoryTracker:
     """Tracks and analyzes historical IV data"""
     
-    def __init__(self, db_path: str = "scanner.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str = None):
+        self.db_path = db_path or str(Path.home() / ".schwab" / "scanner.db")
         self._init_db()
     
     def _init_db(self):
@@ -31,6 +37,18 @@ class IVHistoryTracker:
             )
         ''')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_iv_symbol_date ON iv_history(symbol, date)')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS realized_vol_history (
+                symbol TEXT NOT NULL,
+                date TEXT NOT NULL,
+                window_days INTEGER NOT NULL,
+                rv_yang_zhang REAL NOT NULL,
+                source TEXT,
+                created_at TEXT,
+                PRIMARY KEY (symbol, date, window_days)
+            )
+        ''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_rv_symbol_date ON realized_vol_history(symbol, date)')
         conn.commit()
         conn.close()
     
@@ -68,6 +86,67 @@ class IVHistoryTracker:
         conn.close()
         
         return history
+
+    def history_confidence(self, history: List[Tuple[str, float]]) -> str:
+        """Return HIGH/LOW/NONE based on point count and freshness."""
+        if len(history) < LOW_CONFIDENCE_MIN_POINTS:
+            return "NONE"
+        try:
+            last_date = datetime.strptime(history[-1][0], "%Y-%m-%d").date()
+            age = (datetime.now().date() - last_date).days
+        except Exception:
+            age = STALE_HISTORY_DAYS + 1
+        if len(history) >= HIGH_CONFIDENCE_MIN_POINTS and age <= STALE_HISTORY_DAYS:
+            return "HIGH"
+        return "LOW"
+
+    def calculate_iv_metrics(self, symbol: str, current_iv: float, days: int = 365) -> dict:
+        """
+        Calculate IV rank, IV percentile, divergence, and sparse-history confidence.
+
+        For fewer than 60 observations we intentionally do not pretend to know
+        annual distribution rank; callers can fall back to raw IV or sector medians.
+        """
+        history = self.get_iv_history(symbol, days=days)
+        confidence = self.history_confidence(history)
+        out = {
+            "symbol": symbol.upper(),
+            "current_iv": current_iv,
+            "history_points": len(history),
+            "history_confidence": confidence,
+            "iv_rank": None,
+            "iv_percentile": None,
+            "iv_rank_percentile_divergence": None,
+            "iv_outlier_distorted": False,
+            "iv_min": None,
+            "iv_max": None,
+            "iv_median": None,
+            "last_iv_date": history[-1][0] if history else None,
+        }
+        if confidence == "NONE":
+            out["estimated_percentile"] = self._estimate_percentile(current_iv)
+            return out
+
+        ivs = [float(iv) for _, iv in history if iv is not None]
+        if not ivs:
+            return out
+        iv_low = min(ivs)
+        iv_high = max(ivs)
+        iv_rank = 50.0 if iv_high == iv_low else ((current_iv - iv_low) / (iv_high - iv_low)) * 100
+        iv_percentile = (sum(1 for iv in ivs if iv < current_iv) / len(ivs)) * 100
+        median_iv = statistics.median(ivs)
+        divergence = abs(iv_rank - iv_percentile)
+
+        out.update({
+            "iv_rank": max(0.0, min(100.0, iv_rank)),
+            "iv_percentile": max(0.0, min(100.0, iv_percentile)),
+            "iv_rank_percentile_divergence": divergence,
+            "iv_outlier_distorted": divergence > 25 or any(iv > median_iv * 2 for iv in ivs if median_iv > 0),
+            "iv_min": iv_low,
+            "iv_max": iv_high,
+            "iv_median": median_iv,
+        })
+        return out
     
     def calculate_iv_percentile(self, symbol: str, current_iv: float) -> float:
         """
@@ -168,6 +247,86 @@ class IVHistoryTracker:
             'median': statistics.median(ivs),
             'std_dev': statistics.stdev(ivs) if len(ivs) > 1 else 0
         }
+
+    def record_realized_vol(self, symbol: str, rv_yang_zhang: float, window_days: int = 30, source: str = "schwab"):
+        """Record today's realized volatility estimate."""
+        today = datetime.now().strftime('%Y-%m-%d')
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute('''
+                INSERT OR REPLACE INTO realized_vol_history
+                (symbol, date, window_days, rv_yang_zhang, source, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (symbol.upper(), today, int(window_days), float(rv_yang_zhang), source, datetime.now().isoformat()))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def latest_realized_vol(self, symbol: str, window_days: int = 30, max_age_days: int = 5) -> Optional[float]:
+        """Return recent Yang-Zhang realized vol if available."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            row = conn.execute('''
+                SELECT date, rv_yang_zhang FROM realized_vol_history
+                WHERE symbol=? AND window_days=?
+                ORDER BY date DESC LIMIT 1
+            ''', (symbol.upper(), int(window_days))).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return None
+        try:
+            age = (datetime.now().date() - datetime.strptime(row[0], "%Y-%m-%d").date()).days
+        except Exception:
+            age = max_age_days + 1
+        return float(row[1]) if age <= max_age_days else None
+
+
+def yang_zhang_realized_vol(candles: List[dict], window_days: int = 30) -> Optional[float]:
+    """
+    Yang-Zhang realized volatility, annualized and returned as percentage.
+
+    Candles should contain open/high/low/close fields. At least window_days + 1
+    candles are needed because overnight variance uses the prior close.
+    """
+    clean = []
+    for c in candles or []:
+        try:
+            o = float(c["open"])
+            h = float(c["high"])
+            l = float(c["low"])
+            close = float(c["close"])
+            if min(o, h, l, close) <= 0:
+                continue
+            clean.append({"open": o, "high": h, "low": l, "close": close})
+        except Exception:
+            continue
+    if len(clean) < window_days + 1:
+        return None
+
+    sample = clean[-(window_days + 1):]
+    overnight = []
+    open_close = []
+    rs_terms = []
+    for i in range(1, len(sample)):
+        prev_close = sample[i - 1]["close"]
+        o = sample[i]["open"]
+        h = sample[i]["high"]
+        l = sample[i]["low"]
+        c = sample[i]["close"]
+        overnight.append(math.log(o / prev_close))
+        open_close.append(math.log(c / o))
+        rs_terms.append(math.log(h / o) * math.log(h / c) + math.log(l / o) * math.log(l / c))
+
+    n = len(open_close)
+    if n < 2:
+        return None
+    var_o = statistics.variance(overnight)
+    var_oc = statistics.variance(open_close)
+    mean_rs = statistics.mean(rs_terms)
+    k = 0.34 / (1.34 + (n + 1) / (n - 1))
+    variance = max(0.0, var_o + k * var_oc + (1 - k) * mean_rs)
+    return math.sqrt(variance * 252) * 100
 
 
 # Seed with some baseline data for common symbols

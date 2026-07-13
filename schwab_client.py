@@ -1,6 +1,6 @@
 """
 Schwab API Client for Options and Trading Data
-Built for options-income portfolio diversification research
+Built for Manu's portfolio diversification research
 
 OAuth2 Flow:
 1. Run authenticate() to get initial tokens
@@ -169,7 +169,6 @@ class SchwabClient:
         }
         with open(self.token_path, 'w') as f:
             json.dump(data, f, indent=2)
-        os.chmod(self.token_path, 0o600)  # tokens are secrets -- owner read/write only
         print(f"✓ Tokens saved to {self.token_path}")
     
     def _is_token_expired(self) -> bool:

@@ -766,11 +766,11 @@ class SmartScanner:
         self.iv_strategy = IVSpikeStrategy(self.client)
         self.call_strategy = CoveredCallStrategy(self.client)
         
-        # Default watchlist -- EXAMPLE symbols only, replace with your own
+        # Default watchlist
         self.watchlist = [
-            # Diversification targets (example)
+            # Diversification targets
             'VST', 'CEG', 'UNH', 'RTX', 'LMT', 'PFE', 'JNJ', 'NEE',
-            # Example holdings -- replace with your actual positions
+            # Your positions
             'NVDA', 'ORCL', 'AMD', 'TSLA', 'AMZN', 'MSFT'
         ]
     

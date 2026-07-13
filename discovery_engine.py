@@ -107,7 +107,7 @@ SECTOR_UNIVERSE = {
 
 # Map every stock in universe to its sector
 STOCK_SECTOR_MAP = {
-    # Technology sector map -- EXAMPLE only, customize for your own allocation
+    # Tech (user's existing heavy allocation)
     'MSFT': 'Technology', 'NVDA': 'Technology', 'ORCL': 'Technology',
     'AMD': 'Technology', 'AMZN': 'Technology', 'TSLA': 'Technology',
     'AAPL': 'Technology', 'CRDO': 'Technology', 'INTC': 'Technology',
@@ -118,7 +118,7 @@ for _sector, _info in SECTOR_UNIVERSE.items():
         STOCK_SECTOR_MAP[_s] = _sector
 
 
-# EXAMPLE target allocation -- customize weights to your own strategy
+# Balanced target allocation — still tech-heavy (your edge) but diversified
 TARGET_ALLOCATION = {
     'Technology': 55.0,
     'Healthcare': 10.0,
