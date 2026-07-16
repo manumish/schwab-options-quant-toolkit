@@ -2,6 +2,10 @@
 
 A Python client for the Charles Schwab Trader API with focus on options chain data and cash-secured put analysis for portfolio diversification.
 
+For the system-level story—benefits, operational outcomes, and the edge created
+by combining quantitative screening with portfolio-aware underwriting—see
+[`QUANT_TIP_OVERVIEW.md`](QUANT_TIP_OVERVIEW.md).
+
 ## Features
 
 - **OAuth2 Authentication**: Full OAuth2 flow with automatic token refresh
